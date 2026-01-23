@@ -1,9 +1,10 @@
 //! Uses the age crate to encrypt, decrypt and rekey files
 
 use std::{
+    collections::HashSet,
     convert::Into,
     fs,
-    io::{self, BufReader},
+    io::{self, BufReader, Read},
     path::Path,
 };
 
@@ -16,12 +17,89 @@ use age::{
     decryptor::RecipientsDecryptor,
 };
 
+use base64::{
+    prelude::{BASE64_STANDARD, BASE64_STANDARD_NO_PAD},
+    Engine,
+};
 use color_eyre::{
     eyre::{eyre, Result, WrapErr},
     Help,
 };
-
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
+
+// [Copied from str4d/rage age-core/src/format.rs]
+// https://github.com/str4d/rage/blob/c266bfa44c829621e2db647ced820fca357b032f/age-core/src/format.rs#L11
+const STANZA_PREFIX: &str = "-> ";
+
+// [Copied from str4d/rage age/src/format.rs]
+// https://github.com/str4d/rage/blob/c266bfa44c829621e2db647ced820fca357b032f/age/src/format.rs#L20
+const MAC_PREFIX: &str = "---";
+
+// [Copied from str4d/rage age/src/ssh.rs]
+// https://github.com/str4d/rage/blob/c266bfa44c829621e2db647ced820fca357b032f/age/src/ssh.rs#L26-L27
+const SSH_ED25519_TAG: &str = "ssh-ed25519";
+const SSH_RSA_TAG: &str = "ssh-rsa";
+
+/// Extracts SSH recipient fingerprints from an age file.
+/// Returns Err if any non-SSH recipient type is found.
+pub(crate) fn recipient_fingerprints<P: AsRef<Path>>(path: P) -> Result<HashSet<String>> {
+    let path_str = path.as_ref().to_str().map(String::from);
+    let input_reader = InputReader::new(path_str)?;
+    let mut reader = ArmoredReader::new(input_reader);
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).wrap_err("Failed to read age file")?;
+
+    // Find MAC line (header ends there, ciphertext after is binary)
+    let mac_prefix = MAC_PREFIX.as_bytes();
+    let header_end = data
+        .windows(mac_prefix.len())
+        .position(|w| w == mac_prefix)
+        .unwrap_or(data.len());
+    let header = String::from_utf8(data[..header_end].to_vec()).wrap_err("Invalid UTF-8 in header")?;
+
+    let mut fingerprints = HashSet::new();
+    for line in header.lines() {
+        let Some(stanza) = line.strip_prefix(STANZA_PREFIX) else {
+            continue;
+        };
+        let parts: Vec<&str> = stanza.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let (tag, encoded_tag) = (parts[0], parts[1]);
+        match tag {
+            SSH_ED25519_TAG | SSH_RSA_TAG => {
+                fingerprints.insert(format!("{tag}:{encoded_tag}"));
+            }
+            // Ignore grease stanzas (tags ending in "-grease", added by age for forward compatibility)
+            t if t.ends_with("-grease") => {}
+            _ => return Err(eyre!("Cannot verify non-SSH recipient type: {}", tag)),
+        }
+    }
+    Ok(fingerprints)
+}
+
+/// Computes the fingerprint for an SSH public key string.
+///
+/// Takes a full pubkey like "ssh-ed25519 AAAA... comment" and returns "{tag}:{encoded_tag}"
+/// where encoded_tag is base64_no_pad(sha256(ssh_key)[0..4]).
+///
+/// [Copied from str4d/rage encoded_tag computation (not public API)](
+/// https://github.com/str4d/rage/blob/c266bfa44c829621e2db647ced820fca357b032f/age/src/ssh/recipient.rs#L195
+pub(crate) fn fingerprint_from_pubkey(pubkey: &str) -> Result<String> {
+    // Validate it's a valid SSH key (uses public age API)
+    pubkey
+        .parse::<age::ssh::Recipient>()
+        .map_err(|_| eyre!("Cannot verify non-SSH key"))?;
+    // Parse: "{tag} {base64_ssh_key} [comment]"
+    let parts: Vec<&str> = pubkey.trim().split_whitespace().collect();
+    let tag = parts[0];
+    let ssh_key = BASE64_STANDARD.decode(parts[1]).wrap_err("Invalid base64 in SSH key")?;
+    // Compute encoded_tag: base64_no_pad(sha256(ssh_key)[0..4])
+    let encoded_tag = BASE64_STANDARD_NO_PAD.encode(&Sha256::digest(&ssh_key)[..4]);
+    Ok(format!("{tag}:{encoded_tag}"))
+}
 
 fn get_age_decryptor<P: AsRef<Path>>(
     path: P,

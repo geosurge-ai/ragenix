@@ -3,6 +3,7 @@ use color_eyre::{
     Help, SectionExt,
 };
 use jsonschema::JSONSchema;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::{
     fs::{self, OpenOptions},
@@ -91,6 +92,17 @@ pub(crate) struct RagenixRule {
     pub public_keys: Vec<String>,
 }
 
+/// Returns Ok(true) if rekey is needed, Ok(false) if recipients are unchanged.
+/// Returns Err if we cannot verify (non-SSH keys, parse errors, etc.).
+fn requires_rekey(rule: &RagenixRule) -> Result<bool> {
+    let old = age::recipient_fingerprints(&rule.path)?;
+    let mut new = HashSet::new();
+    for pubkey in &rule.public_keys {
+        new.insert(age::fingerprint_from_pubkey(pubkey)?);
+    }
+    Ok(old != new)
+}
+
 /// Validate conformance of the passed path to the JSON schema [`AGENIX_JSON_SCHEMA`].
 pub(crate) fn validate_rules_file<P: AsRef<Path>>(path: P) -> Result<()> {
     if !path.as_ref().exists() {
@@ -142,7 +154,8 @@ pub(crate) fn parse_rules<P: AsRef<Path>>(rules_path: P) -> Result<Vec<RagenixRu
     Ok(rules)
 }
 
-/// Rekey all entries with the specified public keys
+/// Rekey all entries with the specified public keys.
+/// Only rekeys files where the recipients have changed.
 pub(crate) fn rekey(
     entries: &[RagenixRule],
     identities: &[String],
@@ -151,8 +164,15 @@ pub(crate) fn rekey(
     let identities = age::get_identities(identities)?;
     for entry in entries {
         if entry.path.exists() {
-            writeln!(writer, "Rekeying {}", entry.path.display())?;
-            age::rekey(&entry.path, &identities, &entry.public_keys)?;
+            match requires_rekey(entry) {
+                Ok(false) => {
+                    writeln!(writer, "Skipping {} (recipients unchanged)", entry.path.display())?;
+                }
+                Ok(true) | Err(_) => {
+                    writeln!(writer, "Rekeying {}", entry.path.display())?;
+                    age::rekey(&entry.path, &identities, &entry.public_keys)?;
+                }
+            }
         } else {
             writeln!(writer, "Does not exist, ignored: {}", entry.path.display())?;
         }
