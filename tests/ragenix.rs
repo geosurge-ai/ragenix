@@ -269,6 +269,96 @@ fn rekeying_works() -> Result<()> {
 
 #[test]
 #[cfg_attr(not(feature = "recursive-nix"), ignore)]
+fn rekeying_skips_unchanged_recipients() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let dir_path = fs::canonicalize(dir.path())?;
+
+    let key_alice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILoPdkEfhcsmW6Lg86GMrEJZnYfFBb7fL9G/IXK7pDQd";
+    let key_bob = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPciwjPFuXWWGMlnNT1aLBGvd0VKpP4YBtffq+T/X7rH";
+    let key_x25519 = "age1qjzezkeazfdg4p9x0kjapjtreyyt74pg34ftzfypcdpy7wgh6acqxeyvwt";
+    let key_alice_and_bob = format!("{key_alice}\" \"{key_bob}");
+
+    // Test patterns: (before, after, should_rekey)
+    let test_cases: Vec<(&str, &str, bool)> = vec![
+        (key_alice, key_alice, false),              // unchanged
+        (key_alice, key_bob, true),                 // changed to different key
+        (key_alice, key_x25519, true),              // changed to X25519 (can't verify)
+        (key_alice, &key_alice_and_bob, true),      // added key
+    ];
+
+    // Copy identity key
+    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+    let keys_dir = dir_path.join("keys");
+    fs::create_dir(&keys_dir)?;
+    fs::copy(example_dir.join("keys/id_ed25519"), keys_dir.join("id_ed25519"))?;
+
+    // Create a control secret that should never change
+    let control_rules = formatdoc! {r#"{{ "control.age".publicKeys = [ "{key_alice}" ]; }}"#};
+    fs::write(dir_path.join("secrets.nix"), &control_rules)?;
+    let stdin_path = dir_path.join("stdin");
+    fs::write(&stdin_path, "control")?;
+    Command::cargo_bin(crate_name!())?
+        .current_dir(&dir_path)
+        .arg("--edit")
+        .arg("control.age")
+        .env("EDITOR", "-")
+        .pipe_stdin(&stdin_path)?
+        .assert()
+        .success();
+    let control_before = fs::read_to_string(dir_path.join("control.age"))?;
+
+    for (i, (before, after, should_rekey)) in test_cases.iter().enumerate() {
+        let secret = format!("secret{i}.age");
+
+        // Create encrypted file (include control.age in rules)
+        let rules = formatdoc! {r#"{{
+            "control.age".publicKeys = [ "{key_alice}" ];
+            "{secret}".publicKeys = [ "{before}" ];
+        }}"#};
+        fs::write(dir_path.join("secrets.nix"), &rules)?;
+
+        fs::write(&stdin_path, &secret)?;
+        Command::cargo_bin(crate_name!())?
+            .current_dir(&dir_path)
+            .arg("--edit")
+            .arg(&secret)
+            .env("EDITOR", "-")
+            .pipe_stdin(&stdin_path)?
+            .assert()
+            .success();
+
+        let content_before = fs::read_to_string(dir_path.join(&secret))?;
+
+        // Update recipient and rekey
+        let rules = formatdoc! {r#"{{
+            "control.age".publicKeys = [ "{key_alice}" ];
+            "{secret}".publicKeys = [ "{after}" ];
+        }}"#};
+        fs::write(dir_path.join("secrets.nix"), &rules)?;
+
+        Command::cargo_bin(crate_name!())?
+            .current_dir(&dir_path)
+            .arg("--rekey")
+            .arg("--identity")
+            .arg("keys/id_ed25519")
+            .assert()
+            .success();
+
+        let content_after = fs::read_to_string(dir_path.join(&secret))?;
+        let control_after = fs::read_to_string(dir_path.join("control.age"))?;
+
+        // Control should never change
+        assert_eq!(control_before, control_after, "case {i}: control should never rekey");
+
+        let did_rekey = content_before != content_after;
+        assert_eq!(did_rekey, *should_rekey, "case {i}: {before} → {after}");
+    }
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "recursive-nix"), ignore)]
 fn rekeying_ignores_not_existing_files() -> Result<()> {
     let (_dir, path) = copy_example_to_tmpdir()?;
 
