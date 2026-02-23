@@ -16,6 +16,7 @@ pub(crate) struct Opts {
     pub rekey: bool,
     pub rules: String,
     pub schema: bool,
+    pub check: bool,
     pub verbose: bool,
 }
 
@@ -51,6 +52,13 @@ fn build() -> Command {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("check")
+                .help("check that all secrets have been rekeyed with current recipients, exit with error if not")
+                .long("check")
+                .short('c')
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("identity")
                 .help("private key to use when decrypting")
                 .long("identity")
@@ -76,7 +84,7 @@ fn build() -> Command {
         )
         .group(
             ArgGroup::new("action")
-                .args(["decrypt", "edit", "rekey", "schema"])
+                .args(["decrypt", "edit", "rekey", "schema", "check"])
                 .required(true),
         )
         .arg(
@@ -124,6 +132,7 @@ where
             .cloned()
             .expect("Should never happen"),
         schema: matches.get_flag("schema"),
+        check: matches.get_flag("check"),
         verbose: matches.get_flag("verbose"),
     }
 }

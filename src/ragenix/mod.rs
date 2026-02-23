@@ -180,6 +180,32 @@ pub(crate) fn rekey(
     Ok(())
 }
 
+/// Check that all secrets have up-to-date recipients without modifying any files.
+/// Returns an error immediately if any secret needs rekeying or does not exist.
+pub(crate) fn check(
+    entries: &[RagenixRule],
+    mut writer: impl Write,
+) -> Result<()> {
+    for entry in entries {
+        if entry.path.exists() {
+            match requires_rekey(entry) {
+                Ok(false) => {
+                    writeln!(writer, "OK {}", entry.path.display())?;
+                }
+                Ok(true) => {
+                    return Err(eyre!("{} needs rekeying", entry.path.display()));
+                }
+                Err(_) => {
+                    return Err(eyre!("{} needs rekeying (unverifiable recipients)", entry.path.display()));
+                }
+            }
+        } else {
+            return Err(eyre!("{} does not exist", entry.path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Edit/create an age-encrypted file
 ///
 /// If the file doesn't exist yet, a new file is created and opened in `editor`.
