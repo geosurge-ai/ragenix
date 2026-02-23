@@ -359,6 +359,117 @@ fn rekeying_skips_unchanged_recipients() -> Result<()> {
 
 #[test]
 #[cfg_attr(not(feature = "recursive-nix"), ignore)]
+fn check_flag_succeeds_when_recipients_unchanged() -> Result<()> {
+    let (_dir, path) = copy_example_to_tmpdir()?;
+
+    let mut cmd = Command::cargo_bin(crate_name!())?;
+    let assert = cmd
+        .current_dir(&path)
+        .arg("--check")
+        .assert();
+
+    assert.success().stdout(predicate::str::contains("OK "));
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "recursive-nix"), ignore)]
+fn check_flag_fails_when_recipients_changed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let dir_path = fs::canonicalize(dir.path())?;
+
+    let key_alice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILoPdkEfhcsmW6Lg86GMrEJZnYfFBb7fL9G/IXK7pDQd";
+    let key_bob = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPciwjPFuXWWGMlnNT1aLBGvd0VKpP4YBtffq+T/X7rH";
+
+    // Copy identity key
+    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+    let keys_dir = dir_path.join("keys");
+    fs::create_dir(&keys_dir)?;
+    fs::copy(example_dir.join("keys/id_ed25519"), keys_dir.join("id_ed25519"))?;
+
+    // Create encrypted file with key_alice
+    let rules = formatdoc! {r#"{{ "secret.age".publicKeys = [ "{key_alice}" ]; }}"#};
+    fs::write(dir_path.join("secrets.nix"), &rules)?;
+    let stdin_path = dir_path.join("stdin");
+    fs::write(&stdin_path, "secret")?;
+    Command::cargo_bin(crate_name!())?
+        .current_dir(&dir_path)
+        .arg("--edit")
+        .arg("secret.age")
+        .env("EDITOR", "-")
+        .pipe_stdin(&stdin_path)?
+        .assert()
+        .success();
+
+    // Change recipient to key_bob
+    let rules = formatdoc! {r#"{{ "secret.age".publicKeys = [ "{key_bob}" ]; }}"#};
+    fs::write(dir_path.join("secrets.nix"), &rules)?;
+
+    // --check should fail because recipients changed
+    let mut cmd = Command::cargo_bin(crate_name!())?;
+    let assert = cmd
+        .current_dir(&dir_path)
+        .arg("--check")
+        .assert();
+
+    assert
+        .failure()
+        .stderr(predicate::str::contains("needs rekeying"));
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "recursive-nix"), ignore)]
+fn check_flag_does_not_modify_files() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let dir_path = fs::canonicalize(dir.path())?;
+
+    let key_alice = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILoPdkEfhcsmW6Lg86GMrEJZnYfFBb7fL9G/IXK7pDQd";
+    let key_bob = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPciwjPFuXWWGMlnNT1aLBGvd0VKpP4YBtffq+T/X7rH";
+
+    // Copy identity key
+    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("example");
+    let keys_dir = dir_path.join("keys");
+    fs::create_dir(&keys_dir)?;
+    fs::copy(example_dir.join("keys/id_ed25519"), keys_dir.join("id_ed25519"))?;
+
+    // Create encrypted file with key_alice
+    let rules = formatdoc! {r#"{{ "secret.age".publicKeys = [ "{key_alice}" ]; }}"#};
+    fs::write(dir_path.join("secrets.nix"), &rules)?;
+    let stdin_path = dir_path.join("stdin");
+    fs::write(&stdin_path, "secret")?;
+    Command::cargo_bin(crate_name!())?
+        .current_dir(&dir_path)
+        .arg("--edit")
+        .arg("secret.age")
+        .env("EDITOR", "-")
+        .pipe_stdin(&stdin_path)?
+        .assert()
+        .success();
+
+    let content_before = fs::read_to_string(dir_path.join("secret.age"))?;
+
+    // Change recipient to key_bob and run --check
+    let rules = formatdoc! {r#"{{ "secret.age".publicKeys = [ "{key_bob}" ]; }}"#};
+    fs::write(dir_path.join("secrets.nix"), &rules)?;
+
+    Command::cargo_bin(crate_name!())?
+        .current_dir(&dir_path)
+        .arg("--check")
+        .assert()
+        .failure();
+
+    // File should NOT have been modified
+    let content_after = fs::read_to_string(dir_path.join("secret.age"))?;
+    assert_eq!(content_before, content_after, "file should not be modified in test mode");
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(not(feature = "recursive-nix"), ignore)]
 fn rekeying_ignores_not_existing_files() -> Result<()> {
     let (_dir, path) = copy_example_to_tmpdir()?;
 

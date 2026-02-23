@@ -55,6 +55,8 @@ fn main() -> Result<()> {
             // `EDITOR`/`--editor` is mandatory if action is `--edit`
             let editor = &opts.editor.unwrap();
             ragenix::edit(&rule, &identities, editor, &mut std::io::stdout())?;
+        } else if opts.check {
+            ragenix::check(&rules, &mut std::io::stdout())?;
         } else if opts.rekey {
             ragenix::rekey(&rules, &identities, &mut std::io::stdout())?;
         }
