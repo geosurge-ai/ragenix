@@ -36,7 +36,18 @@
           rust-overlay.overlays.default
           self.overlays.default
           (final: prev: {
-            rustToolchain = final.rust-bin.fromRustupToolchainFile ./rust-toolchain;
+            # Dynamic target selection: Linux needs musl for static builds, Darwin needs native
+            rustToolchain =
+              let
+                target =
+                  if final.stdenv.isLinux
+                  then final.pkgsStatic.stdenv.targetPlatform.rust.cargoShortTarget
+                  else final.stdenv.targetPlatform.rust.cargoShortTarget;
+              in
+              final.rust-bin.stable.latest.minimal.override {
+                extensions = [ "rust-src" "clippy" "rustfmt" ];
+                targets = [ target ];
+              };
             craneLib = (crane.mkLib prev).overrideToolchain final.rustToolchain;
           })
         ];
